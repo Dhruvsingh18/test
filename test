@@ -62,15 +62,38 @@ from isaaclab.envs.mdp.actions.actions_cfg import (
 from isaaclab.envs.mdp.actions.actions_cfg import JointVelocityActionCfg
 
 
-def reset_wheel_joints(env, asset_name="reeman_robot", position_range=(-0.1,0.1), velocity_range=(0,0)):
-    robot = env.scene[asset_name]
-    for joint in ["left_wheel_joint", "right_wheel_joint"]:
-        robot.set_joint_position(joint, np.random.uniform(*position_range))
-        robot.set_joint_velocity(joint, np.random.uniform(*velocity_range))
+from isaaclab.envs.manager_based_rl_env_cfg import ManagerBasedRLEnvCfg
+from isaaclab.utils.configclass import configclass
 
-def reset_robot_base(env, asset_name="reeman_robot"):
+
+def reset_wheel_joints(env, **kwargs):
+    asset_name = kwargs["asset_name"]
+    position_range = kwargs["position_range"]
+    velocity_range = kwargs["velocity_range"]
+
     robot = env.scene[asset_name]
-    robot.set_world_pose(position=[0,0,0.1], orientation=[0,0,0,1])
+
+    # randomize wheel joint positions
+    low, high = position_range
+    pos = torch.empty_like(robot.data.joint_pos).uniform_(low, high)
+    robot.write_joint_state(joint_pos=pos)
+
+    # randomize wheel joint velocities
+    vlow, vhigh = velocity_range
+    vel = torch.empty_like(robot.data.joint_vel).uniform_(vlow, vhigh)
+    robot.write_joint_state(joint_vel=vel)
+
+def reset_robot_base(env, **kwargs):
+    asset_name = kwargs["asset_name"]
+    position = kwargs["position"]
+    orientation = kwargs["orientation"]
+
+    robot = env.scene[asset_name]
+
+    robot.write_root_pose(
+        position=torch.tensor(position),
+        orientation=torch.tensor(orientation)
+    )
 
 def forward_x_reward(env, asset_name="reeman_robot"):
     robot = env.scene[asset_name]
@@ -81,6 +104,31 @@ def collision_penalty(env, asset_name="reeman_robot"):
     forces = robot.root_physx_view.get_contact_force_tensor()[0]
     return float(torch.norm(forces, dim=-1).sum() > 0)
 
+def wheel_positions(env, asset_name="reeman_robot"):
+    """Return wheel joint positions."""
+    # get indices for this asset's joints
+    robot = env.scene[asset_name]
+    wheel_joint_ids = robot.joint_ids  # or filter for wheel names if needed
+    return env.joint_pos[:, wheel_joint_ids]
+
+
+def wheel_velocities(env, asset_name="reeman_robot"):
+    """Return wheel joint velocities."""
+    robot = env.scene[asset_name]
+    wheel_joint_ids = robot.joint_ids
+    return env.joint_vel[:, wheel_joint_ids]
+
+
+def base_linear_velocity(env, asset_name="reeman_robot"):
+    """Return base linear velocity in world frame."""
+    robot = env.scene[asset_name]
+    return robot.data.root_lin_vel
+
+
+def last_action_applied(env):
+    """Return the previous actions sent to the robot."""
+    # saved automatically by manager
+    return env.actions
 
 # ------------------------------------------------------------------------ #
 # SCENE
@@ -127,27 +175,26 @@ class ActionsCfg:
         scale=1.0
     )
 
-
-def _wheel_indices(robot):
-    names = robot.joint_names
-    targets = ["left_wheel_joint", "right_wheel_joint"]
-    return [names.index(name) for name in targets]
-
 @configclass
 class ObservationsCfg:
     @configclass
     class Policy(ObsGroup):
-        wheel_vel = ObsTerm(
-            func=lambda env: env.scene["reeman_robot"].data.joint_vel[0, _wheel_indices(env.scene["reeman_robot"])].detach().clone().unsqueeze(0)
-        )
 
-        base_pos = ObsTerm(
-            func=lambda env: env.scene["reeman_robot"].root_pos_w[0].detach().clone().unsqueeze(0)
-        )
+        wheel_pos = ObsTerm(func= wheel_positions,
+                        params={"asset_name": "reeman_robot"},
+                        noise=Unoise(n_min=-0.01, n_max=0.01))
 
-        base_lin_vel = ObsTerm(
-            func=lambda env: env.scene["reeman_robot"].root_lin_vel_w[0].detach().clone().unsqueeze(0)
-        )
+        wheel_vel = ObsTerm(func= wheel_velocities,
+                        params={"asset_name": "reeman_robot"},
+                        noise=Unoise(n_min=-0.01, n_max=0.01))
+
+        base_vel = ObsTerm(func= base_linear_velocity,
+                       params={"asset_name": "reeman_robot"})
+
+    last_action = ObsTerm(func= last_action_applied)
+    def __post_init__(self):
+        self.enable_corruption = True
+        self.concatenate_terms = True
 
     policy: Policy = Policy()
 
@@ -160,12 +207,15 @@ class RewardsCfg:
         weight=1.0,
         params={}
     )
+
+    '''
     collision_penalty = RewTerm(
         func=collision_penalty,
         weight=-5.0,
         params={}
     )
 
+    '''
 @configclass
 class TerminationsCfg:
     timeout = DoneTerm(
@@ -174,17 +224,29 @@ class TerminationsCfg:
 
 @configclass
 class EventCfg:
+    # Reset wheel joints with small random offsets
     reset_wheels = EventTerm(
-        func=reset_wheel_joints,
+        func=reset_wheel_joints,      # custom helper
         mode="reset",
-        params={}
+        params={
+            "asset_name": "reeman_robot",
+            "position_range": (-0.1, 0.1),     # small variations
+            "velocity_range": (0.0, 0.0)       # stop wheels
+        }
     )
 
+    # Reset robot base pose (position + orientation)
     reset_base = EventTerm(
-        func=reset_robot_base,
+        func=reset_robot_base,         # custom helper
         mode="reset",
-        params={}
+        params={
+            "asset_name": "reeman_robot",
+            # spawn slightly above ground to prevent initial contact issues
+            "position": [0.0, 0.0, 0.1],
+            "orientation": [0.0, 0.0, 0.0, 1.0],   # quaternion: no rotation
+        }
     )
+
 
 @configclass
 class ReemanEnvCfg(ManagerBasedRLEnvCfg):
