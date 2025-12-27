@@ -1,0 +1,205 @@
+
+import numpy as np
+import torch
+import isaaclab.sim as sim_utils
+import isaaclab.managers as mdp
+
+from isaaclab.envs.manager_based_rl_env_cfg import ManagerBasedRLEnvCfg
+from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
+from isaaclab.managers import (
+    ObservationGroupCfg as ObsGroup,
+    ObservationTermCfg as ObsTerm,
+    RewardTermCfg as RewTerm,
+    TerminationTermCfg as DoneTerm,
+    EventTermCfg as EventTerm,
+    ActionTermCfg,
+)
+
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets.articulation import ArticulationCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.utils import configclass
+
+
+from isaaclab.managers import ActionTermCfg
+from isaaclab.utils import configclass
+import isaaclab.sim as sim_utils
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import ActionTermCfg as ActionTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
+
+from isaaclab.envs.mdp.actions.actions_cfg import (
+    JointPositionActionCfg,
+    JointVelocityActionCfg,
+    JointEffortActionCfg,
+)
+
+from isaaclab.envs.mdp.actions.actions_cfg import JointVelocityActionCfg
+
+
+def reset_wheel_joints(env, asset_name="reeman_robot", position_range=(-0.1,0.1), velocity_range=(0,0)):
+    robot = env.scene[asset_name]
+    for joint in ["left_wheel_joint", "right_wheel_joint"]:
+        robot.set_joint_position(joint, np.random.uniform(*position_range))
+        robot.set_joint_velocity(joint, np.random.uniform(*velocity_range))
+
+def reset_robot_base(env, asset_name="reeman_robot"):
+    robot = env.scene[asset_name]
+    robot.set_world_pose(position=[0,0,0.1], orientation=[0,0,0,1])
+
+def forward_x_reward(env, asset_name="reeman_robot"):
+    robot = env.scene[asset_name]
+    return robot.data.root_pos_w[0,0]  # x position
+
+def collision_penalty(env, asset_name="reeman_robot"):
+    robot = env.scene[asset_name]
+    forces = robot.root_physx_view.get_contact_force_tensor()[0]
+    return float(torch.norm(forces, dim=-1).sum() > 0)
+
+
+# ------------------------------------------------------------------------ #
+# SCENE
+# ------------------------------------------------------------------------ #
+
+
+class ReemanSceneCfg(InteractiveSceneCfg):
+    """Spawns ground, lighting & Reeman robot."""
+
+    # Add these two lines
+    num_envs: int = 1         # only one environment
+    env_spacing: float = 1.0  # any positive value works if only 1 env
+
+    reeman_robot = ArticulationCfg(
+        prim_path="/World/Reeman",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/dhruv/Downloads/purple_assy_urdf_test7_2/"
+                     "purple_assy_urdf_test7/urdf/purple_new_backup/purple_new_backup.usd"
+        ),
+        actuators={
+            "wheel_acts": ImplicitActuatorCfg(
+                joint_names_expr=["left_wheel_joint", "right_wheel_joint"],
+                stiffness=100.0,  # add default stiffness
+                damping=1.0       # add default damping
+            )
+        }
+    )
+
+    ground = AssetBaseCfg(
+        prim_path="/World/defaultGroundPlane",
+        spawn=sim_utils.GroundPlaneCfg()
+    )
+
+    dome_light = AssetBaseCfg(
+        prim_path="/World/Light",
+        spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
+    )
+
+@configclass
+class ActionsCfg:
+    wheel_vel: mdp.ActionTermCfg = JointVelocityActionCfg(
+        asset_name="reeman_robot",
+        joint_names=["left_wheel_joint", "right_wheel_joint"],
+        scale=1.0
+    )
+
+
+def _wheel_indices(robot):
+    names = robot.joint_names
+    targets = ["left_wheel_joint", "right_wheel_joint"]
+    return [names.index(name) for name in targets]
+
+@configclass
+class ObservationsCfg:
+    @configclass
+    class Policy(ObsGroup):
+        wheel_vel = ObsTerm(
+            func=lambda env: env.scene["reeman_robot"].data.joint_vel[0, _wheel_indices(env.scene["reeman_robot"])].detach().clone().unsqueeze(0)
+        )
+
+        base_pos = ObsTerm(
+            func=lambda env: env.scene["reeman_robot"].root_pos_w[0].detach().clone().unsqueeze(0)
+        )
+
+        base_lin_vel = ObsTerm(
+            func=lambda env: env.scene["reeman_robot"].root_lin_vel_w[0].detach().clone().unsqueeze(0)
+        )
+
+    policy: Policy = Policy()
+
+
+@configclass
+class RewardsCfg:
+
+    forward_reward = RewTerm(
+        func=forward_x_reward,
+        weight=1.0,
+        params={}
+    )
+    collision_penalty = RewTerm(
+        func=collision_penalty,
+        weight=-5.0,
+        params={}
+    )
+
+@configclass
+class TerminationsCfg:
+    timeout = DoneTerm(
+        func=lambda env: env.episode_length_buf >= env.max_episode_length
+    )
+
+@configclass
+class EventCfg:
+    reset_wheels = EventTerm(
+        func=reset_wheel_joints,
+        mode="reset",
+        params={}
+    )
+
+    reset_base = EventTerm(
+        func=reset_robot_base,
+        mode="reset",
+        params={}
+    )
+
+@configclass
+class ReemanEnvCfg(ManagerBasedRLEnvCfg):
+    decimation: int = 2
+    scene: ReemanSceneCfg = ReemanSceneCfg()
+    observations: ObservationsCfg = ObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+    events: EventCfg = EventCfg()
+    episode_length_s: float = 30.0
+    render_interval: int = 2 
+    params = {"env_id": 0} 
+
+
+def __post_init__(self):
+        self.scene.num_envs = 1
+        self.scene.env_spacing = 1.0
