@@ -130,11 +130,6 @@ def last_action_applied(env):
     # saved automatically by manager
     return env.actions
 
-# ------------------------------------------------------------------------ #
-# SCENE
-# ------------------------------------------------------------------------ #
-
-
 class ReemanSceneCfg(InteractiveSceneCfg):
     """Spawns ground, lighting & Reeman robot."""
 
