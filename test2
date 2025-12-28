@@ -1,0 +1,91 @@
+# two_wheel_env.py
+# Basic RL environment configuration for a two-wheel differential drive robot in Isaac Lab
+
+import numpy as np
+import torch
+import isaaclab.sim as sim_utils
+import isaaclab.managers as mdp
+from isaaclab.envs.manager_based_rl_env_cfg import ManagerBasedRLEnvCfg
+from isaaclab.assets.articulations_config import ArticulationCfg
+from isaaclab.managers.observation_manager_cfg import ObservationGroupCfg
+from isaaclab.managers.action_manager_cfg import ActionGroupCfg
+from isaaclab.managers.reward_manager_cfg import RewardGroupCfg
+from isaaclab.utils.math import wrap_to_pi
+
+
+# ------------------------
+# Robot Asset Configuration
+# ------------------------
+class TwoWheelBotCfg(ArticulationCfg):
+    # Replace with your robot USD asset path
+    usd_path = "purple_assy_urdf_test7/urdf/purple_new_backup/purple_new_backup.usd"
+    init_state = {
+        "joint_positions": [0.0, 0.0],  # left_wheel, right_wheel
+        "joint_velocities": [0.0, 0.0],
+    }
+    # wheel joint names must match USD
+    joint_names = ["left_wheel_joint", "right_wheel_joint"]
+
+
+# ------------------------
+# Observation Configuration
+# ------------------------
+class TwoWheelObsCfg(ObservationGroupCfg):
+    def configure(self):
+        # relative joint positions and velocities
+        joint_pos = self.func(mdp.joint_pos_rel, noise=mdp.Unoise(n_min=-0.01, n_max=0.01))
+        joint_vel = self.func(mdp.joint_vel_rel, noise=mdp.Unoise(n_min=-0.01, n_max=0.01))
+        # base linear and angular velocity
+        base_vel = self.func(mdp.base_lin_ang_vel)
+        return [joint_pos, joint_vel, base_vel]
+
+
+# ------------------------
+# Action Configuration
+# ------------------------
+class TwoWheelActionCfg(ActionGroupCfg):
+    def configure(self):
+        wheel_vel_cmd = self.func(mdp.joint_vel_action, joint_names=["left_wheel_joint", "right_wheel_joint"], scale=5.0)
+        return [wheel_vel_cmd]
+
+
+# ------------------------
+# Reward Configuration
+# ------------------------
+class TwoWheelRewardCfg(RewardGroupCfg):
+    target_lin_vel = 0.5  # m/s forward
+
+    def configure(self):
+        # Reward moving forward at target linear velocity
+        def forward_velocity_reward(env, obs):
+            current_vel = env.get_base_linear_velocity()[0]  # x direction
+            return -abs(self.target_lin_vel - current_vel)
+
+        # Penalize excessive wheel velocity difference (encourage straight motion)
+        def smooth_drive_penalty(env, obs):
+            left_vel, right_vel = env.get_joint_velocities()
+            return -abs(left_vel - right_vel)
+
+        return [
+            self.term(forward_velocity_reward, weight=1.0),
+            self.term(smooth_drive_penalty, weight=0.2),
+        ]
+
+
+# ------------------------
+# Full Environment Configuration
+# ------------------------
+class TwoWheelEnvCfg(ManagerBasedRLEnvCfg):
+    robot = TwoWheelBotCfg
+    observations = {"policy": TwoWheelObsCfg()}
+    actions = {"wheel_vel": TwoWheelActionCfg()}
+    rewards = {"movement": TwoWheelRewardCfg()}
+
+    # physics settings
+    sim = sim_utils.SimulationCfg(dt=0.02, substeps=2)
+
+    # environment settings
+    env = ManagerBasedRLEnvCfg.EnvCfg(
+        num_envs=64,  # adjust for your GPU
+        episode_length_s=10.0,
+    )
